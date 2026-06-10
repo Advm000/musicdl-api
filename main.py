@@ -88,7 +88,7 @@ def api_search():
     try:
         import yt_dlp
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True}) as ydl:
-            info = ydl.extract_info(f"ytsearch{n}:{q}", download=False)
+            info = ydl.extract_info(f"ytmsearch{n}:{q}", download=False)
         results = []
         for e in (info or {}).get("entries", []):
             thumb = e.get("thumbnail", "")
