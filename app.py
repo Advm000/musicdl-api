@@ -1,44 +1,20 @@
 """
 Music DL — Backend serveur pour Android
-Flask API avec CORS — télécharge en temp, streame au client, supprime
+Flask API avec CORS
 """
 
 import os, json, uuid, tempfile, threading, time
 import urllib.request, urllib.parse
 from flask import Flask, Response, request, jsonify, send_file, stream_with_context
 from flask_cors import CORS
-import yt_dlp, imageio_ffmpeg
 import shutil
 
-# ── FFmpeg — lazy init ────────────────────────────────────────────────────────
-_FFMPEG_DIR = None
-
-def _get_ffmpeg():
-    global _FFMPEG_DIR
-    if _FFMPEG_DIR:
-        return _FFMPEG_DIR
-    src = imageio_ffmpeg.get_ffmpeg_exe()
-    tmp = os.path.join(tempfile.gettempdir(), "musicdl_ff")
-    os.makedirs(tmp, exist_ok=True)
-    dst = os.path.join(tmp, os.path.basename(src))
-    if not os.path.exists(dst):
-        shutil.copy2(src, dst)
-        try: os.chmod(dst, 0o755)
-        except: pass
-    _FFMPEG_DIR = tmp
-    return tmp
-
 app = Flask(__name__)
-CORS(app)  # autorise toutes les origines (app Android)
+CORS(app)
 
 APP_VERSION = "3.1.0"
-
-# jobs en mémoire : job_id -> état
 jobs = {}
-# fichiers temp prêts à être téléchargés : job_id -> path
 ready_files = {}
-
-# ── Utilitaires ───────────────────────────────────────────────────────────────
 
 def _fmt_dur(s):
     if not s: return "—"
@@ -52,7 +28,20 @@ def _fmt_views(n):
     if n >= 1_000:     return f"{n/1_000:.0f}K vues"
     return f"{n} vues"
 
-# ── Routes de base ────────────────────────────────────────────────────────────
+def _get_ffmpeg():
+    try:
+        import imageio_ffmpeg
+        src = imageio_ffmpeg.get_ffmpeg_exe()
+        tmp = os.path.join(tempfile.gettempdir(), "musicdl_ff")
+        os.makedirs(tmp, exist_ok=True)
+        dst = os.path.join(tmp, os.path.basename(src))
+        if not os.path.exists(dst):
+            shutil.copy2(src, dst)
+            try: os.chmod(dst, 0o755)
+            except: pass
+        return tmp
+    except Exception:
+        return None
 
 @app.route("/")
 def index():
@@ -69,8 +58,6 @@ def api_ping():
         return jsonify({"online": True})
     except Exception:
         return jsonify({"online": False})
-
-# ── Recherche ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/suggest")
 def api_suggest():
@@ -93,6 +80,7 @@ def api_search():
     except: n = 20
     if not q: return jsonify([])
     try:
+        import yt_dlp
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "extract_flat": True}) as ydl:
             info = ydl.extract_info(f"ytsearch{n}:{q}", download=False)
         results = []
@@ -114,8 +102,6 @@ def api_search():
     except Exception as ex:
         return jsonify({"error": str(ex)}), 500
 
-# ── Téléchargement ────────────────────────────────────────────────────────────
-
 @app.route("/api/download", methods=["POST"])
 def api_download():
     data   = request.json or {}
@@ -128,27 +114,30 @@ def api_download():
     return jsonify({"job_id": job_id})
 
 def _download_server(job_id, url):
+    import yt_dlp
     tmp_dir = tempfile.mkdtemp(prefix="musicdl_")
+    ffmpeg_dir = _get_ffmpeg()
+
     def hook(d):
         j = jobs[job_id]
         if j.get("cancelled"): raise Exception("__cancelled__")
         if d["status"] == "downloading":
             raw = (d.get("_percent_str", "0")
-                   .replace("%", "").replace("\x1b[0;94m", "").replace("\x1b[0m", "").strip())
-            try:    pct = float(raw)
+                   .replace("%","").replace("\x1b[0;94m","").replace("\x1b[0m","").strip())
+            try: pct = float(raw)
             except: pct = 0.0
             spd = d.get("_speed_str", "").strip()
             eta = d.get("_eta_str", "").strip()
             j["progress"] = pct
-            j["status"]   = f"{spd} — ETA {eta}" if spd else "Téléchargement…"
+            j["status"] = f"{spd} — ETA {eta}" if spd else "Téléchargement…"
         elif d["status"] == "finished":
             j["progress"] = 99
-            j["status"]   = "Conversion MP3…"
+            j["status"] = "Conversion MP3…"
+
     try:
         opts = {
             "format":          "bestaudio/best",
             "outtmpl":         os.path.join(tmp_dir, "%(title)s.%(ext)s"),
-            "ffmpeg_location": _get_ffmpeg(),
             "postprocessors":  [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
                 {"key": "FFmpegMetadata", "add_metadata": True},
@@ -157,20 +146,24 @@ def _download_server(job_id, url):
             "writethumbnail": True, "embedthumbnail": True,
             "progress_hooks": [hook], "quiet": True, "no_warnings": True,
         }
+        if ffmpeg_dir:
+            opts["ffmpeg_location"] = ffmpeg_dir
+
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([url])
-        # Trouver le fichier MP3 généré
+
         mp3_files = [f for f in os.listdir(tmp_dir) if f.lower().endswith(".mp3")]
         if not mp3_files:
             raise Exception("Fichier MP3 introuvable après conversion")
         mp3_path = os.path.join(tmp_dir, mp3_files[0])
         ready_files[job_id] = {"path": mp3_path, "name": mp3_files[0], "dir": tmp_dir}
         jobs[job_id].update({"progress": 100, "status": "Prêt", "done": True})
-        # Nettoyage auto après 10 minutes
+
         def cleanup():
             time.sleep(600)
             _cleanup_job(job_id)
         threading.Thread(target=cleanup, daemon=True).start()
+
     except Exception as ex:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         if jobs[job_id].get("cancelled") or "__cancelled__" in str(ex):
@@ -205,19 +198,11 @@ def api_cancel(job_id):
 
 @app.route("/api/file/<job_id>")
 def api_file(job_id):
-    """Télécharge le fichier MP3 prêt, puis le supprime du serveur."""
     rf = ready_files.get(job_id)
     if not rf or not os.path.exists(rf["path"]):
         return jsonify({"error": "Fichier non disponible"}), 404
-    path = rf["path"]
-    name = rf["name"]
-    response = send_file(
-        path,
-        mimetype="audio/mpeg",
-        as_attachment=True,
-        download_name=name,
-    )
-    # Nettoyage après envoi
+    response = send_file(rf["path"], mimetype="audio/mpeg",
+                         as_attachment=True, download_name=rf["name"])
     @response.call_on_close
     def cleanup():
         _cleanup_job(job_id)
@@ -226,6 +211,7 @@ def api_file(job_id):
 @app.route("/api/yt/url/<vid>")
 def api_yt_url(vid):
     try:
+        import yt_dlp
         opts = {"quiet": True, "no_warnings": True, "format": "bestaudio/best", "noplaylist": True}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(f"https://www.youtube.com/watch?v={vid}", download=False)
@@ -240,4 +226,4 @@ def api_yt_url(vid):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
