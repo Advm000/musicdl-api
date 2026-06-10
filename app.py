@@ -3,29 +3,30 @@ Music DL — Backend serveur pour Android
 Flask API avec CORS — télécharge en temp, streame au client, supprime
 """
 
-import os, io, json, uuid, tempfile, threading, time, re
+import os, json, uuid, tempfile, threading, time
 import urllib.request, urllib.parse
 from flask import Flask, Response, request, jsonify, send_file, stream_with_context
 from flask_cors import CORS
 import yt_dlp, imageio_ffmpeg
-from mutagen.mp3 import MP3
-from mutagen.id3 import ID3
-from mutagen.easyid3 import EasyID3
 import shutil
 
-# ── FFmpeg ────────────────────────────────────────────────────────────────────
-def _setup_ffmpeg():
+# ── FFmpeg — lazy init ────────────────────────────────────────────────────────
+_FFMPEG_DIR = None
+
+def _get_ffmpeg():
+    global _FFMPEG_DIR
+    if _FFMPEG_DIR:
+        return _FFMPEG_DIR
     src = imageio_ffmpeg.get_ffmpeg_exe()
     tmp = os.path.join(tempfile.gettempdir(), "musicdl_ff")
     os.makedirs(tmp, exist_ok=True)
-    dst = os.path.join(tmp, "ffmpeg")
+    dst = os.path.join(tmp, os.path.basename(src))
     if not os.path.exists(dst):
         shutil.copy2(src, dst)
         try: os.chmod(dst, 0o755)
         except: pass
+    _FFMPEG_DIR = tmp
     return tmp
-
-FFMPEG_DIR = _setup_ffmpeg()
 
 app = Flask(__name__)
 CORS(app)  # autorise toutes les origines (app Android)
@@ -147,7 +148,7 @@ def _download_server(job_id, url):
         opts = {
             "format":          "bestaudio/best",
             "outtmpl":         os.path.join(tmp_dir, "%(title)s.%(ext)s"),
-            "ffmpeg_location": FFMPEG_DIR,
+            "ffmpeg_location": _get_ffmpeg(),
             "postprocessors":  [
                 {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "320"},
                 {"key": "FFmpegMetadata", "add_metadata": True},
