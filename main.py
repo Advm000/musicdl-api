@@ -4,7 +4,7 @@ import shutil
 from flask import Flask, Response, request, jsonify, send_file, stream_with_context
 
 app = Flask(__name__)
-APP_VERSION = "3.1.0"
+APP_VERSION = "1.0.0"
 jobs = {}
 ready_files = {}
 
