@@ -1,5 +1,4 @@
 flask>=3.0.0
-flask-cors>=4.0.0
 yt-dlp>=2024.1.0
 mutagen>=1.47.0
 imageio-ffmpeg>=0.4.9
